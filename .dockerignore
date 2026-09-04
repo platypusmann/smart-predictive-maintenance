@@ -1,0 +1,9 @@
+node_modules
+**/node_modules
+ml/artifacts/dataset.csv
+ml/artifacts/model.joblib
+loadtest/results
+.git
+.env
+docs
+*.md

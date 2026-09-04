@@ -1,0 +1,5 @@
+# Pinned to minor versions so a rebuilt model is reproducible.
+numpy>=1.26,<3
+pandas>=2.1,<4
+scikit-learn>=1.4,<2
+joblib>=1.3,<2

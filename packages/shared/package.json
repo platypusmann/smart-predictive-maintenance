@@ -1,0 +1,14 @@
+{
+  "name": "@pdm/shared",
+  "version": "1.0.0",
+  "description": "Shared feature extraction, model scoring, event bus, storage and policy for the predictive maintenance platform",
+  "main": "src/index.js",
+  "license": "MIT",
+  "dependencies": {
+    "mqtt": "^5.10.1"
+  },
+  "optionalDependencies": {
+    "@aws-sdk/client-sqs": "^3.700.0",
+    "mongoose": "^8.9.0"
+  }
+}

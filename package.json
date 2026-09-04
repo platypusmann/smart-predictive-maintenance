@@ -1,0 +1,36 @@
+{
+  "name": "smart-predictive-maintenance",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Scalable IoT predictive maintenance platform for a manufacturing site (SIT314 distinction project)",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "loadtest"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "flows:build": "node node-red/build-flows.js",
+    "ml:dataset": "cd ml && python3 generate_dataset.py --machines 400",
+    "ml:train": "cd ml && python3 train_model.py",
+    "ml:parity": "cd ml && python3 verify_parity.py",
+    "ml:all": "npm run ml:dataset && npm run ml:train && npm run ml:parity",
+    "start:broker": "node services/broker/src/server.js",
+    "start:ingestion": "node services/ingestion/src/server.js",
+    "start:inference": "node services/inference/src/server.js",
+    "start:alerting": "node services/alerting/src/server.js",
+    "start:dashboard": "node services/dashboard/src/server.js",
+    "start:simulator": "node services/simulator/src/index.js",
+    "start:edge": "node services/edge-bridge/src/index.js",
+    "start:stack": "node scripts/run-stack.js",
+    "loadtest": "node loadtest/src/ramp.js",
+    "smoke": "node scripts/smoke-test.js"
+  },
+  "devDependencies": {
+    "aedes": "^0.51.3"
+  }
+}

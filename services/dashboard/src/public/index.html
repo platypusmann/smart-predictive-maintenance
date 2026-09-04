@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Predictive Maintenance &mdash; Fleet Overview</title>
+<style>
+  :root {
+    --bg: #0f1720;
+    --panel: #17202b;
+    --line: #24303d;
+    --text: #e6edf3;
+    --muted: #8b9bab;
+    --accent: #4fa3ff;
+    --warn: #ffb454;
+    --bad: #ff6b6b;
+    --good: #4ade80;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  h1 { font-size: 19px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; }
+  main { padding: 24px 28px; max-width: 1200px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 14px;
+    margin-bottom: 26px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .card h2 {
+    margin: 0 0 10px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .metric { font-size: 27px; font-weight: 650; letter-spacing: -0.02em; }
+  .metric small { font-size: 13px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+  .row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; }
+  .row span:first-child { color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 600;
+  }
+  .pill.open { background: rgba(255,107,107,0.16); color: var(--bad); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 7px; }
+  .up { background: var(--good); }
+  .down { background: var(--bad); }
+  .empty { color: var(--muted); padding: 18px 10px; font-size: 13.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Predictive Maintenance &mdash; Fleet Overview</h1>
+  <span class="sub" id="updated">connecting&hellip;</span>
+</header>
+
+<main>
+  <div class="grid" id="services"></div>
+
+  <div class="card">
+    <h2>Open work orders</h2>
+    <div id="workorders"><div class="empty">No open work orders.</div></div>
+  </div>
+</main>
+
+<script>
+const SERVICES = ['ingestion', 'inference', 'alerting'];
+
+function statusDot(metrics) {
+  const healthy = metrics && !metrics.error;
+  return '<span class="dot ' + (healthy ? 'up' : 'down') + '"></span>';
+}
+
+function renderService(name, metrics) {
+  if (!metrics || metrics.error) {
+    return '<div class="card"><h2>' + statusDot(metrics) + name + '</h2>' +
+           '<div class="metric" style="color:var(--muted);font-size:15px">' +
+           'unreachable (' + ((metrics && metrics.error) || 'no data') + ')</div></div>';
+  }
+
+  const counters = metrics.counters || {};
+  const latency = metrics.latencyMs || {};
+  const headline =
+    counters.readings_accepted ?? counters.predictions_scored ??
+    counters.work_orders_created ?? 0;
+  const label =
+    counters.readings_accepted !== undefined ? 'readings accepted'
+    : counters.predictions_scored !== undefined ? 'predictions scored'
+    : 'work orders raised';
+
+  let rows = '';
+  for (const [key, value] of Object.entries(counters)) {
+    rows += '<div class="row"><span>' + key.replace(/_/g, ' ') + '</span><span>' +
+            value.toLocaleString() + '</span></div>';
+  }
+  if (latency.samples) {
+    rows += '<div class="row"><span>latency p50 / p95</span><span>' +
+            latency.p50 + ' / ' + latency.p95 + ' ms</span></div>';
+  }
+  rows += '<div class="row"><span>uptime</span><span>' +
+          (metrics.uptimeSeconds || 0) + ' s</span></div>';
+
+  return '<div class="card"><h2>' + statusDot(metrics) + name + '</h2>' +
+         '<div class="metric">' + headline.toLocaleString() +
+         '<small>' + label + '</small></div>' + rows + '</div>';
+}
+
+function renderWorkOrders(orders) {
+  if (!orders.length) return '<div class="empty">No open work orders.</div>';
+  let html = '<table><thead><tr><th>Machine</th><th>Risk</th>' +
+             '<th>Raised</th><th>Status</th></tr></thead><tbody>';
+  for (const wo of orders) {
+    html += '<tr><td>' + wo.machineId + '</td>' +
+            '<td>' + Number(wo.riskScore).toFixed(3) + '</td>' +
+            '<td>' + new Date(wo.createdAt).toLocaleTimeString() + '</td>' +
+            '<td><span class="pill open">' + wo.status + '</span></td></tr>';
+  }
+  return html + '</tbody></table>';
+}
+
+async function refresh() {
+  try {
+    const response = await fetch('/api/overview');
+    const data = await response.json();
+    document.getElementById('services').innerHTML =
+      SERVICES.map((s) => renderService(s, data.services[s])).join('');
+    document.getElementById('workorders').innerHTML =
+      renderWorkOrders(data.workOrders || []);
+    document.getElementById('updated').textContent =
+      'updated ' + new Date(data.fetchedAt).toLocaleTimeString();
+  } catch (err) {
+    document.getElementById('updated').textContent = 'dashboard unreachable';
+  }
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

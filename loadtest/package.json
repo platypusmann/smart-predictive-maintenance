@@ -1,0 +1,8 @@
+{
+  "name": "@pdm/loadtest",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/ramp.js",
+  "scripts": { "start": "node src/ramp.js" },
+  "dependencies": { "@pdm/shared": "*" }
+}

@@ -1,0 +1,165 @@
+# Containerised equivalent of `npm run start:stack`.
+#
+# Useful for checking the images build and run correctly before pushing them to
+# ECR, since these are the same Dockerfiles that ship to Fargate. For everyday
+# development the npm script is faster because it skips the image build.
+#
+#   docker compose up --build
+#   docker compose --profile load up   # adds the simulator and edge bridge
+
+services:
+
+  broker:
+    image: eclipse-mosquitto:2
+    container_name: pdm-broker
+    ports:
+      - '1883:1883'
+    command: >
+      sh -c "printf 'listener 1883\nallow_anonymous true\n' > /mosquitto/config/mosquitto.conf
+      && exec mosquitto -c /mosquitto/config/mosquitto.conf"
+    healthcheck:
+      test: ['CMD-SHELL', 'mosquitto_sub -t healthcheck -C 1 -W 2 || exit 0']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  mongo:
+    image: mongo:7
+    container_name: pdm-mongo
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand("ping")']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: services/ingestion/Dockerfile
+    container_name: pdm-ingestion
+    ports:
+      - '3001:3001'
+    environment:
+      STORE_DRIVER: mongo
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB_NAME: pdm
+      EVENT_BUS_DRIVER: mqtt
+      MQTT_URL: mqtt://broker:1883
+      API_KEY: ${API_KEY:-local-dev-key}
+    depends_on:
+      broker:
+        condition: service_started
+      mongo:
+        condition: service_healthy
+
+  inference:
+    build:
+      context: .
+      dockerfile: services/inference/Dockerfile
+    container_name: pdm-inference
+    ports:
+      - '3002:3002'
+    environment:
+      STORE_DRIVER: mongo
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB_NAME: pdm
+      EVENT_BUS_DRIVER: mqtt
+      MQTT_URL: mqtt://broker:1883
+      RISK_THRESHOLD: '0.7'
+      # Raise this to make a single task saturate sooner during scaling demos.
+      CPU_BURN_MS: ${CPU_BURN_MS:-0}
+    depends_on:
+      broker:
+        condition: service_started
+      mongo:
+        condition: service_healthy
+    # Scale locally with: docker compose up --scale inference=4
+    # Port publishing must be removed before scaling past one replica.
+
+  alerting:
+    build:
+      context: .
+      dockerfile: services/alerting/Dockerfile
+    container_name: pdm-alerting
+    ports:
+      - '3003:3003'
+    environment:
+      STORE_DRIVER: mongo
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DB_NAME: pdm
+      EVENT_BUS_DRIVER: mqtt
+      MQTT_URL: mqtt://broker:1883
+      RISK_THRESHOLD: '0.7'
+      CONSECUTIVE_BREACHES: '3'
+    depends_on:
+      broker:
+        condition: service_started
+      mongo:
+        condition: service_healthy
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: services/dashboard/Dockerfile
+    container_name: pdm-dashboard
+    ports:
+      - '3000:3000'
+    environment:
+      INGESTION_URL: http://ingestion:3001
+      INFERENCE_URL: http://inference:3002
+      ALERTING_URL: http://alerting:3003
+    depends_on:
+      - ingestion
+      - inference
+      - alerting
+
+  node-red:
+    image: nodered/node-red:4.0
+    container_name: pdm-node-red
+    ports:
+      - '1880:1880'
+    environment:
+      PDM_API_KEY: ${API_KEY:-local-dev-key}
+    volumes:
+      - ./node-red/flows.json:/data/flows.json:ro
+      - node-red-data:/data
+    depends_on:
+      - broker
+      - ingestion
+
+  # --- Load generation (opt in with --profile load) ------------------------
+
+  simulator:
+    profiles: ['load']
+    build:
+      context: .
+      dockerfile: services/ingestion/Dockerfile
+    container_name: pdm-simulator
+    command: ['node', 'services/simulator/src/index.js', '--machines', '50', '--time-scale', '120']
+    environment:
+      MQTT_URL: mqtt://broker:1883
+    depends_on:
+      - broker
+
+  edge-bridge:
+    profiles: ['load']
+    build:
+      context: .
+      dockerfile: services/ingestion/Dockerfile
+    container_name: pdm-edge-bridge
+    command: ['node', 'services/edge-bridge/src/index.js']
+    environment:
+      MQTT_URL: mqtt://broker:1883
+      INGESTION_URL: http://ingestion:3001
+      API_KEY: ${API_KEY:-local-dev-key}
+    depends_on:
+      - broker
+      - ingestion
+
+volumes:
+  mongo-data:
+  node-red-data:
