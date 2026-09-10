@@ -1,49 +1,43 @@
 'use strict';
 
-/**
- * Inference microservice.
- *
- * Consumes feature events, scores them with the exported random forest, stores
- * the prediction, and republishes anything above the risk threshold for the
- * alerting service. The process is stateless: it holds no per-machine memory
- * between messages, which is precisely what allows the AWS Auto Scaling Group
- * to add and remove tasks freely while the queue absorbs the difference.
- *
- * This is the service the scaling experiment targets, because model scoring is
- * the most CPU-intensive step in the pipeline.
- */
+// Inference service
+// Listens for feature events, scores them with the random forest and saves the
+// prediction. Anything over the risk threshold is passed on to alerting.
+// This is the service that auto scales on AWS.
 
 const path = require('path');
 const express = require('express');
+const mongoose = require('mongoose');
 const {
   loadConfig,
   createLogger,
-  createStore,
-  createEventBus,
   RandomForest,
   Metrics,
   TOPICS,
+  messaging,
 } = require('@pdm/shared');
 
 const config = loadConfig();
-const log = createLogger('inference', config.logLevel);
+const log = createLogger('inference');
 const metrics = new Metrics();
 
-const modelPath =
-  config.modelPath ||
-  path.resolve(__dirname, '../../../ml/artifacts/model.json');
+const modelPath = config.modelPath || path.resolve(__dirname, '../../../ml/artifacts/model.json');
 
-/** Optional artificial work per message, used to make scaling observable. */
-const cpuBurnMs = Number(process.env.CPU_BURN_MS || 0);
+// extra fake work per message, makes it easier to trigger scaling in the demo
+const CPU_BURN_MS = Number(process.env.CPU_BURN_MS || 0);
+
+const Prediction = mongoose.model('Prediction', new mongoose.Schema({
+  machineId: { type: String, required: true, index: true },
+  timestamp: Date,
+  riskScore: Number,
+  predictedFailing: Boolean,
+  modelVersion: String,
+  inferenceLatencyMs: Number,
+}));
+
 function burnCpu(ms) {
-  if (ms <= 0) return;
   const until = Date.now() + ms;
-  while (Date.now() < until) {
-    // Busy loop. Only ever enabled deliberately during load tests, so a modest
-    // number of simulated machines can saturate a task and trigger a scale-out
-    // without needing a fleet of thousands.
-    Math.sqrt(Math.random());
-  }
+  while (Date.now() < until) Math.sqrt(Math.random());
 }
 
 async function main() {
@@ -51,124 +45,69 @@ async function main() {
   try {
     forest = RandomForest.fromFile(modelPath);
   } catch (err) {
-    log.error('could not load model', { modelPath, error: err.message });
-    log.error('run "npm run ml:all" first to generate ml/artifacts/model.json');
+    log.error(`could not load model from ${modelPath}, run "npm run ml:all" first`, { error: err.message });
     process.exit(1);
   }
+  log.info('model loaded', { version: forest.modelVersion, trees: forest.trees.length });
 
-  log.info('model loaded', {
-    modelPath,
-    modelVersion: forest.modelVersion,
-    trees: forest.trees.length,
-    features: forest.featureNames.length,
-    rocAuc: forest.metadata.rocAuc,
-  });
+  await mongoose.connect(config.mongoUri);
+  await messaging.connect(`inference-${process.pid}`);
 
-  const store = await createStore(config).connect();
-  const bus = await createEventBus({
-    clientId: `inference-${process.pid}`,
-    config,
-  }).connect();
+  await messaging.subscribe(TOPICS.FEATURES, async (event) => {
+    const start = process.hrtime.bigint();
+    const result = forest.score(event.features, config.riskThreshold);
+    if (CPU_BURN_MS > 0) burnCpu(CPU_BURN_MS);
+    const latencyMs = Number(process.hrtime.bigint() - start) / 1e6;
 
-  await bus.subscribe(TOPICS.FEATURES, async (event) => {
-    const startedAt = process.hrtime.bigint();
-    try {
-      const result = forest.score(event.features, config.riskThreshold);
-      burnCpu(cpuBurnMs);
+    await Prediction.create({
+      machineId: event.machineId,
+      timestamp: event.timestamp || new Date(),
+      riskScore: result.riskScore,
+      predictedFailing: result.predictedFailing,
+      modelVersion: result.modelVersion,
+      inferenceLatencyMs: latencyMs,
+    });
 
-      const latencyMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-
-      await store.savePrediction({
+    if (result.predictedFailing) {
+      await messaging.publish(TOPICS.HIGH_RISK, {
         machineId: event.machineId,
-        timestamp: new Date(event.timestamp || Date.now()),
+        machineType: event.machineType,
+        timestamp: event.timestamp,
         riskScore: result.riskScore,
-        predictedFailing: result.predictedFailing,
         modelVersion: result.modelVersion,
-        inferenceLatencyMs: latencyMs,
       });
-
-      if (result.predictedFailing) {
-        await bus.publish(TOPICS.HIGH_RISK, {
-          machineId: event.machineId,
-          machineType: event.machineType,
-          timestamp: event.timestamp,
-          riskScore: result.riskScore,
-          modelVersion: result.modelVersion,
-        });
-        metrics.increment('high_risk_published');
-      }
-
-      metrics.increment('predictions_scored');
-      metrics.observeLatency(latencyMs);
-
-      if (event.emittedAt) {
-        // End-to-end lag from ingestion accepting the reading to it being
-        // scored. This is the number reported as pipeline latency.
-        metrics.observeLatency(Date.now() - event.emittedAt);
-      }
-    } catch (err) {
-      metrics.increment('predictions_failed');
-      log.error('failed to score event', {
-        machineId: event?.machineId,
-        error: err.message,
-      });
-      throw err; // leave the message on the queue for redelivery
+      metrics.increment('high_risk_published');
     }
-  });
 
-  log.info('subscribed to feature events', {
-    topic: TOPICS.FEATURES,
-    bus: bus.driver,
-    store: store.driver,
-    riskThreshold: config.riskThreshold,
-    cpuBurnMs,
+    metrics.increment('predictions_scored');
+    metrics.observeLatency(latencyMs);
   });
 
   const app = express();
-  app.disable('x-powered-by');
 
   app.get('/health', (req, res) => {
-    res.json({
-      status: 'ok',
-      service: 'inference',
-      modelVersion: forest.modelVersion,
-      trees: forest.trees.length,
-    });
+    res.json({ status: 'ok', service: 'inference', modelVersion: forest.modelVersion });
   });
 
   app.get('/metrics', (req, res) => {
-    res.json({ service: 'inference', modelVersion: forest.modelVersion, ...metrics.snapshot() });
+    res.json({ service: 'inference', ...metrics.snapshot() });
   });
 
-  // Synchronous scoring endpoint. Not on the main data path, but useful for
-  // smoke testing a deployed task and for the dashboard's what-if control.
+  // score a single feature vector directly (handy for testing)
   app.post('/api/v1/score', express.json(), (req, res) => {
     try {
-      const result = forest.score(req.body?.features, config.riskThreshold);
-      return res.json(result);
+      res.json(forest.score(req.body?.features, config.riskThreshold));
     } catch (err) {
-      return res.status(400).json({ error: err.message });
+      res.status(400).json({ error: err.message });
     }
   });
 
-  const server = app.listen(config.inferencePort, () => {
-    log.info('inference listening', { port: config.inferencePort });
+  app.listen(config.inferencePort, () => {
+    log.info(`listening on port ${config.inferencePort}`);
   });
-
-  const shutdown = async (signal) => {
-    log.info('shutting down', { signal, ...metrics.snapshot() });
-    server.close(async () => {
-      await bus.close();
-      await store.close();
-      process.exit(0);
-    });
-    setTimeout(() => process.exit(1), 10000).unref();
-  };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 main().catch((err) => {
-  log.error('inference failed to start', { error: err.message });
+  log.error('failed to start', { error: err.message });
   process.exit(1);
 });

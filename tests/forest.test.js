@@ -10,13 +10,9 @@ const { RandomForest, featureNames } = require('@pdm/shared');
 const MODEL_PATH = path.resolve(__dirname, '../ml/artifacts/model.json');
 const hasModel = fs.existsSync(MODEL_PATH);
 
-/**
- * A hand-built two-tree forest. Tree layout follows sklearn's arrays, where
- * children_left[node] === -1 marks a leaf.
- *
- *   tree 0: if f0 <= 5 -> 0.1 else -> 0.9
- *   tree 1: if f1 <= 0 -> 0.2 else -> 0.6
- */
+// small hand made forest with two trees:
+//   tree 0: if f0 <= 5 -> 0.1 else -> 0.9
+//   tree 1: if f1 <= 0 -> 0.2 else -> 0.6
 const TOY_MODEL = {
   format: 'pdm-random-forest-v1',
   featureNames: ['f0', 'f1'],

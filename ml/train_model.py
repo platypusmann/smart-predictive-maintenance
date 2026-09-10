@@ -1,15 +1,9 @@
 """
-Train the failure-risk classifier and export it in two formats:
+Train the random forest and save it two ways:
 
-  artifacts/model.joblib  - native scikit-learn model, used for offline analysis
-  artifacts/model.json    - portable export consumed by the Node.js inference
-                            microservice (see packages/shared/src/forest.js)
-
-The JSON export exists so the inference microservice can stay a pure Node.js
-service, as the unit requires, without shipping a Python runtime or a native
-ONNX dependency into the container. Every tree is exported as flat arrays and
-the JS scorer walks them directly, which is exact rather than approximate.
-`verify_parity.py` proves the two implementations agree.
+  artifacts/model.joblib  - normal sklearn model (used by verify_parity.py)
+  artifacts/model.json    - the trees as JSON so the Node.js inference service
+                            can use them (see packages/shared/src/forest.js)
 
 Usage:
     python train_model.py --data artifacts/dataset.csv
@@ -105,9 +99,7 @@ def main():
     print("\n" + classification_report(y_test, pred, digits=4,
                                        target_names=["healthy", "failing"]))
 
-    # Threshold sweep. The default 0.5 cut maximises recall but raises far too
-    # many false positives to put in front of a technician. This table is what
-    # RISK_THRESHOLD in the running services is chosen from.
+    # try a few thresholds to help pick RISK_THRESHOLD
     print("Threshold sweep (before the alerting service's confirmation streak):")
     print(f"  {'thr':>5} {'precision':>10} {'recall':>8} {'F1':>8} {'alerts/1k':>10}")
     sweep = []

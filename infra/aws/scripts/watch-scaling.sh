@@ -1,53 +1,27 @@
 #!/usr/bin/env bash
-#
-# Record the auto-scaling response during a load test.
-#
-# Samples the features queue depth and the inference service's running task
-# count once per interval and writes them to CSV. This file is the primary
-# evidence that the service scales automatically under load, so it is worth
-# starting it before the load test and leaving it running until well after,
-# to capture the scale-in as well as the scale-out.
-#
+# Prints the features queue depth and the number of inference tasks every few
+# seconds, as CSV. Start it before running the load test:
 #   ./watch-scaling.sh 600 10 > scaling-run1.csv
 
 set -euo pipefail
 
 DURATION="${1:-600}"
 INTERVAL="${2:-10}"
-PROJECT="${PROJECT_NAME:-pdm}"
 REGION="${AWS_REGION:-ap-southeast-2}"
 
-QUEUE_URL="$(aws cloudformation describe-stacks \
-  --region "$REGION" --stack-name "${PROJECT}-foundation" \
-  --query "Stacks[0].Outputs[?OutputKey=='FeaturesQueueUrl'].OutputValue" \
-  --output text)"
+QUEUE_URL="$(aws sqs get-queue-url --region "$REGION" --queue-name pdm-features --query QueueUrl --output text)"
 
-echo "timestamp,elapsed_s,messages_visible,messages_in_flight,running_tasks,desired_tasks"
+echo "time,messages_waiting,running_tasks,desired_tasks"
 
-START="$(date +%s)"
-END=$(( START + DURATION ))
-
+END=$(( $(date +%s) + DURATION ))
 while [[ "$(date +%s)" -lt "$END" ]]; do
-  NOW="$(date +%s)"
+  MESSAGES="$(aws sqs get-queue-attributes --region "$REGION" --queue-url "$QUEUE_URL" \
+    --attribute-names ApproximateNumberOfMessages \
+    --query 'Attributes.ApproximateNumberOfMessages' --output text)"
 
-  ATTRS="$(aws sqs get-queue-attributes \
-    --region "$REGION" \
-    --queue-url "$QUEUE_URL" \
-    --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
-    --query 'Attributes' --output json)"
+  TASKS="$(aws ecs describe-services --region "$REGION" --cluster pdm-cluster --services pdm-inference \
+    --query 'services[0].[runningCount,desiredCount]' --output text | tr '\t' ',')"
 
-  VISIBLE="$(echo "$ATTRS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["ApproximateNumberOfMessages"])')"
-  INFLIGHT="$(echo "$ATTRS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["ApproximateNumberOfMessagesNotVisible"])')"
-
-  TASKS="$(aws ecs describe-services \
-    --region "$REGION" \
-    --cluster "${PROJECT}-cluster" \
-    --services "${PROJECT}-inference" \
-    --query 'services[0].[runningCount,desiredCount]' --output text)"
-
-  RUNNING="$(echo "$TASKS" | cut -f1)"
-  DESIRED="$(echo "$TASKS" | cut -f2)"
-
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$(( NOW - START )),${VISIBLE},${INFLIGHT},${RUNNING},${DESIRED}"
+  echo "$(date +%H:%M:%S),${MESSAGES},${TASKS}"
   sleep "$INTERVAL"
 done

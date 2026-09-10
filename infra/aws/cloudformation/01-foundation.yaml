@@ -1,40 +1,20 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: >
-  Predictive maintenance platform - foundation layer.
-  Network, container registries, and the SQS queues that decouple the
-  microservices. Queue depth on the features queue is the metric the inference
-  service auto-scales on, so this stack has to exist before the services do.
-
-Parameters:
-  ProjectName:
-    Type: String
-    Default: pdm
-    Description: Prefix applied to every resource name.
-  VpcCidr:
-    Type: String
-    Default: 10.20.0.0/16
+Description: PdM foundation - VPC, ECR repositories, SQS queues and secrets
 
 Resources:
-
-  # --- Network -------------------------------------------------------------
-  # Two availability zones so ECS can place tasks across AZs as it scales out.
 
   Vpc:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: !Ref VpcCidr
+      CidrBlock: 10.0.0.0/16
       EnableDnsSupport: true
       EnableDnsHostnames: true
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-vpc'
+          Value: pdm-vpc
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-igw'
 
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -42,27 +22,22 @@ Resources:
       VpcId: !Ref Vpc
       InternetGatewayId: !Ref InternetGateway
 
+  # load balancer needs subnets in two AZs
   PublicSubnetA:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
-      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 8]]
+      CidrBlock: 10.0.1.0/24
       AvailabilityZone: !Select [0, !GetAZs '']
       MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-public-a'
 
   PublicSubnetB:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref Vpc
-      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 8]]
+      CidrBlock: 10.0.2.0/24
       AvailabilityZone: !Select [1, !GetAZs '']
       MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-public-b'
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
@@ -77,184 +52,109 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
-  PublicSubnetARouteAssoc:
+  PublicSubnetARouteTable:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnetA
       RouteTableId: !Ref PublicRouteTable
 
-  PublicSubnetBRouteAssoc:
+  PublicSubnetBRouteTable:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnetB
       RouteTableId: !Ref PublicRouteTable
 
-  # --- Security groups -----------------------------------------------------
-  # The load balancer is the only thing reachable from the internet. Tasks only
-  # accept traffic from the load balancer's security group, never from a CIDR.
-
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Public HTTPS ingress to the application load balancer
+      GroupDescription: HTTP to the load balancer
       VpcId: !Ref Vpc
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-          Description: HTTPS from the internet
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
-          Description: HTTP, redirected to HTTPS by the listener
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-alb-sg'
 
   ServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: ECS tasks; only reachable from the load balancer
+      GroupDescription: ECS tasks, only reachable from the load balancer
       VpcId: !Ref Vpc
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-service-sg'
-
-  ServiceIngressFromAlb:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref ServiceSecurityGroup
-      IpProtocol: tcp
-      FromPort: 3000
-      ToPort: 3010
-      SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
-      Description: Application ports, load balancer only
-
-  # --- Container registries ------------------------------------------------
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3010
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
 
   IngestionRepository:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub '${ProjectName}/ingestion'
-      ImageScanningConfiguration:
-        ScanOnPush: true
+      RepositoryName: pdm/ingestion
 
   InferenceRepository:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub '${ProjectName}/inference'
-      ImageScanningConfiguration:
-        ScanOnPush: true
+      RepositoryName: pdm/inference
 
   AlertingRepository:
     Type: AWS::ECR::Repository
     Properties:
-      RepositoryName: !Sub '${ProjectName}/alerting'
-      ImageScanningConfiguration:
-        ScanOnPush: true
-
-  # --- Messaging -----------------------------------------------------------
-  # Every queue has a dead letter queue. Without one, a message that always
-  # fails would be redelivered forever and would keep the queue depth high,
-  # which would in turn keep the auto-scaling policy scaled out permanently.
-
-  FeaturesDeadLetterQueue:
-    Type: AWS::SQS::Queue
-    Properties:
-      QueueName: !Sub '${ProjectName}-features-dlq'
-      MessageRetentionPeriod: 1209600  # 14 days, the maximum
+      RepositoryName: pdm/alerting
 
   FeaturesQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub '${ProjectName}-features'
-      # Must exceed the inference service's worst-case processing time so a
-      # slow message is not handed to a second consumer while still in flight.
-      VisibilityTimeout: 60
-      MessageRetentionPeriod: 345600  # 4 days
-      RedrivePolicy:
-        deadLetterTargetArn: !GetAtt FeaturesDeadLetterQueue.Arn
-        maxReceiveCount: 5
-
-  HighRiskDeadLetterQueue:
-    Type: AWS::SQS::Queue
-    Properties:
-      QueueName: !Sub '${ProjectName}-high-risk-dlq'
-      MessageRetentionPeriod: 1209600
+      QueueName: pdm-features
 
   HighRiskQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub '${ProjectName}-high-risk'
-      VisibilityTimeout: 60
-      MessageRetentionPeriod: 345600
-      RedrivePolicy:
-        deadLetterTargetArn: !GetAtt HighRiskDeadLetterQueue.Arn
-        maxReceiveCount: 5
+      QueueName: pdm-high-risk
 
-  # --- Secrets -------------------------------------------------------------
-  # The Mongo connection string and the edge API key are never baked into an
-  # image or a task definition; tasks read them at runtime via their task role.
-
+  # value is set by deploy.sh from $MONGO_URI
   MongoUriSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Sub '${ProjectName}/mongo-uri'
-      Description: MongoDB Atlas connection string for the platform
+      Name: pdm/mongo-uri
 
   ApiKeySecret:
     Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Sub '${ProjectName}/edge-api-key'
-      Description: API key presented by the Node-RED edge gateway
+      Name: pdm/edge-api-key
       GenerateSecretString:
-        PasswordLength: 40
+        PasswordLength: 32
         ExcludePunctuation: true
 
 Outputs:
   VpcId:
     Value: !Ref Vpc
     Export:
-      Name: !Sub '${ProjectName}-vpc-id'
+      Name: pdm-vpc-id
   PublicSubnets:
     Value: !Join [',', [!Ref PublicSubnetA, !Ref PublicSubnetB]]
     Export:
-      Name: !Sub '${ProjectName}-public-subnets'
+      Name: pdm-public-subnets
   LoadBalancerSecurityGroupId:
     Value: !Ref LoadBalancerSecurityGroup
     Export:
-      Name: !Sub '${ProjectName}-alb-sg'
+      Name: pdm-alb-sg
   ServiceSecurityGroupId:
     Value: !Ref ServiceSecurityGroup
     Export:
-      Name: !Sub '${ProjectName}-service-sg'
+      Name: pdm-service-sg
   FeaturesQueueUrl:
     Value: !Ref FeaturesQueue
     Export:
-      Name: !Sub '${ProjectName}-features-queue-url'
-  FeaturesQueueArn:
-    Value: !GetAtt FeaturesQueue.Arn
-    Export:
-      Name: !Sub '${ProjectName}-features-queue-arn'
-  FeaturesQueueName:
-    Value: !GetAtt FeaturesQueue.QueueName
-    Export:
-      Name: !Sub '${ProjectName}-features-queue-name'
+      Name: pdm-features-queue-url
   HighRiskQueueUrl:
     Value: !Ref HighRiskQueue
     Export:
-      Name: !Sub '${ProjectName}-high-risk-queue-url'
-  HighRiskQueueArn:
-    Value: !GetAtt HighRiskQueue.Arn
-    Export:
-      Name: !Sub '${ProjectName}-high-risk-queue-arn'
+      Name: pdm-high-risk-queue-url
   MongoUriSecretArn:
     Value: !Ref MongoUriSecret
     Export:
-      Name: !Sub '${ProjectName}-mongo-secret'
+      Name: pdm-mongo-secret
   ApiKeySecretArn:
     Value: !Ref ApiKeySecret
     Export:
-      Name: !Sub '${ProjectName}-api-key-secret'
+      Name: pdm-api-key-secret

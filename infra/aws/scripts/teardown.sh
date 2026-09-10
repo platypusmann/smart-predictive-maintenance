@@ -1,39 +1,32 @@
 #!/usr/bin/env bash
-#
-# Delete every resource this project creates.
-#
-# Running this after each experiment session is the main cost control on a
-# student budget: Fargate tasks and the load balancer bill by the hour whether
-# or not any traffic is flowing.
+# Delete everything from AWS. Run after each session - Fargate and the load
+# balancer cost money even when nothing is happening.
 
 set -euo pipefail
 
-PROJECT="${PROJECT_NAME:-pdm}"
 REGION="${AWS_REGION:-ap-southeast-2}"
 
-read -rp "Delete all ${PROJECT} stacks in ${REGION}? [y/N] " CONFIRM
+read -rp "Delete the pdm stacks in ${REGION}? [y/N] " CONFIRM
 [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]] || { echo "Cancelled."; exit 0; }
 
-# Services first: the foundation stack's exports cannot be deleted while the
-# services stack still imports them.
-echo "Deleting ${PROJECT}-services..."
-aws cloudformation delete-stack --region "$REGION" --stack-name "${PROJECT}-services"
-aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name "${PROJECT}-services"
+# services stack has to go first because it uses the foundation exports
+echo "Deleting pdm-services..."
+aws cloudformation delete-stack --region "$REGION" --stack-name pdm-services
+aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name pdm-services
 
-echo "Emptying ECR repositories..."
+# ECR repos can't be deleted while they still have images in them
+echo "Deleting images..."
 for service in ingestion inference alerting; do
-  IMAGES="$(aws ecr list-images --region "$REGION" \
-    --repository-name "${PROJECT}/${service}" \
+  IMAGES="$(aws ecr list-images --region "$REGION" --repository-name "pdm/${service}" \
     --query 'imageIds[*]' --output json 2>/dev/null || echo '[]')"
   if [[ "$IMAGES" != "[]" ]]; then
-    aws ecr batch-delete-image --region "$REGION" \
-      --repository-name "${PROJECT}/${service}" \
-      --image-ids "$IMAGES" >/dev/null
+    aws ecr batch-delete-image --region "$REGION" --repository-name "pdm/${service}" \
+      --image-ids "$IMAGES" > /dev/null
   fi
 done
 
-echo "Deleting ${PROJECT}-foundation..."
-aws cloudformation delete-stack --region "$REGION" --stack-name "${PROJECT}-foundation"
-aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name "${PROJECT}-foundation"
+echo "Deleting pdm-foundation..."
+aws cloudformation delete-stack --region "$REGION" --stack-name pdm-foundation
+aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name pdm-foundation
 
-echo "Teardown complete."
+echo "Done."

@@ -1,14 +1,7 @@
 'use strict';
 
-/**
- * Simulated machine.
- *
- * The degradation physics here deliberately mirror ml/generate_dataset.py: the
- * same baselines, the same fault gains, the same noise levels and the same
- * severity curve. If the live fleet drifted from the training distribution the
- * model's measured accuracy would not carry over to the running system, so
- * keeping these two files aligned is what makes the offline metrics meaningful.
- */
+// Simulated machine. Uses the same numbers as ml/generate_dataset.py so the
+// live data looks like the training data.
 
 const MACHINE_TYPES = {
   pump: { vibration: 2.5, temperature: 55.0, current: 12.0, rpm: 1450.0 },
@@ -19,7 +12,7 @@ const MACHINE_TYPES = {
 const NOISE = { vibration: 0.12, temperature: 0.45, current: 0.25, rpm: 6.0 };
 const FAULT_GAIN = { vibration: 4.2, temperature: 22.0, current: 6.5, rpm: -180.0 };
 
-/** Deterministic PRNG (mulberry32) so a seeded run is exactly reproducible. */
+// seeded random number generator (mulberry32) so runs are repeatable
 function mulberry32(seed) {
   let a = seed >>> 0;
   return function next() {
@@ -31,7 +24,7 @@ function mulberry32(seed) {
   };
 }
 
-/** Box-Muller transform for gaussian noise from the uniform PRNG. */
+// gaussian noise (Box-Muller)
 function gaussian(rand) {
   let u = 0;
   let v = 0;
@@ -41,14 +34,7 @@ function gaussian(rand) {
 }
 
 class SimulatedMachine {
-  /**
-   * @param {string} id
-   * @param {string} type          one of MACHINE_TYPES
-   * @param {number} seed
-   * @param {number} timeScale     >1 compresses machine life so a run-to-failure
-   *                               cycle completes inside a short demo
-   * @param {boolean} forceHealthy keep this machine fault-free for the whole run
-   */
+  // timeScale > 1 speeds up the machine's life so it fails within a demo
   constructor({ id, type, seed, timeScale = 60, forceHealthy = false }) {
     if (!MACHINE_TYPES[type]) throw new Error(`Unknown machine type: ${type}`);
 
@@ -76,7 +62,7 @@ class SimulatedMachine {
     return Math.min(progress, 1.5) ** this.shape;
   }
 
-  /** Advance simulated time by one wall-clock tick and emit a reading. */
+  // move time forward one tick and return a reading
   tick(tickSeconds = 1) {
     this.simSeconds += tickSeconds * this.timeScale;
 
@@ -101,7 +87,7 @@ class SimulatedMachine {
     return reading;
   }
 
-  /** Replace a failed machine with a freshly overhauled one of the same type. */
+  // replace a failed machine with a new one of the same type
   reset(seed) {
     const replacement = new SimulatedMachine({
       id: this.id,

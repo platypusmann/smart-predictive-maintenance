@@ -2,15 +2,10 @@
 
 const fs = require('fs');
 
-/**
- * Pure-JavaScript scorer for a scikit-learn RandomForestClassifier exported by
- * ml/train_model.py. Walking the exported trees directly keeps the inference
- * microservice a plain Node.js service with no native or Python dependency,
- * and reproduces predict_proba exactly rather than approximating it.
- */
+// Scores the random forest exported by ml/train_model.py (model.json) in plain
+// JS, so the inference service doesn't need Python.
 
-// scikit-learn marks leaves with children_left == -1.
-const LEAF = -1;
+const LEAF = -1; // sklearn uses children_left == -1 for leaf nodes
 
 class RandomForest {
   constructor(exported) {
@@ -31,12 +26,11 @@ class RandomForest {
     return new RandomForest(JSON.parse(fs.readFileSync(path, 'utf8')));
   }
 
-  /** Probability of the positive (failing) class from a single tree. */
+  // probability of "failing" from one tree
   static scoreTree(tree, features) {
     let node = 0;
-    // children_left[node] === LEAF marks a leaf in the sklearn tree layout.
     while (tree.left[node] !== LEAF) {
-      // sklearn's split rule is: go left when X[feature] <= threshold.
+      // same as sklearn: go left if feature <= threshold
       node = features[tree.feature[node]] <= tree.threshold[node]
         ? tree.left[node]
         : tree.right[node];
@@ -44,12 +38,7 @@ class RandomForest {
     return tree.value[node];
   }
 
-  /**
-   * Mean positive-class probability across all trees, which is exactly what
-   * RandomForestClassifier.predict_proba computes.
-   * @param {number[]} features ordered as this.featureNames
-   * @returns {number} risk score in [0, 1]
-   */
+  // average over all the trees (same as predict_proba)
   predictProba(features) {
     if (!Array.isArray(features) || features.length !== this.featureNames.length) {
       throw new Error(
@@ -65,13 +54,12 @@ class RandomForest {
     }
 
     let total = 0;
-    for (let t = 0; t < this.trees.length; t += 1) {
-      total += RandomForest.scoreTree(this.trees[t], features);
+    for (const tree of this.trees) {
+      total += RandomForest.scoreTree(tree, features);
     }
     return total / this.trees.length;
   }
 
-  /** Convenience wrapper returning a labelled result object. */
   score(features, threshold = 0.5) {
     const riskScore = this.predictProba(features);
     return {

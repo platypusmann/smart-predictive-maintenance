@@ -1,62 +1,20 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: >
-  Predictive maintenance platform - services layer.
-  ECS Fargate cluster, task definitions, load balancer, and the auto-scaling
-  policy that scales the inference service on SQS queue depth. This is the
-  stack the scalability demonstration is run against.
-
-Parameters:
-  ProjectName:
-    Type: String
-    Default: pdm
-  ImageTag:
-    Type: String
-    Default: latest
-  CertificateArn:
-    Type: String
-    Default: ''
-    Description: >
-      ACM certificate for HTTPS. Leave blank to deploy an HTTP-only listener
-      for a first smoke test, then redeploy with a certificate.
-  InferenceMinTasks:
-    Type: Number
-    Default: 1
-  InferenceMaxTasks:
-    Type: Number
-    Default: 10
-  # Target backlog per task. The scaling policy adds tasks until each running
-  # task has at most this many messages waiting for it.
-  BacklogPerTaskTarget:
-    Type: Number
-    Default: 30
-
-Conditions:
-  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
+Description: PdM services - ECS cluster, the three services, load balancer and auto scaling
 
 Resources:
-
-  # --- Cluster and logging -------------------------------------------------
 
   Cluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Sub '${ProjectName}-cluster'
-      ClusterSettings:
-        - Name: containerInsights
-          Value: enabled  # supplies the task-count metrics used as evidence
+      ClusterName: pdm-cluster
 
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub '/ecs/${ProjectName}'
-      RetentionInDays: 14
+      LogGroupName: /ecs/pdm
+      RetentionInDays: 7
 
-  # --- IAM -----------------------------------------------------------------
-  # The execution role pulls images and secrets. Each task role grants only the
-  # queue actions that service actually performs: ingestion can send to the
-  # features queue but cannot read it, inference can read features and send to
-  # high-risk but cannot touch high-risk's receive side, and so on.
-
+  # used by ECS to pull images and read the secrets
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -70,19 +28,18 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
       Policies:
-        - PolicyName: read-deployment-secrets
+        - PolicyName: read-secrets
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource:
-                  - !ImportValue
-                    'Fn::Sub': '${ProjectName}-mongo-secret'
-                  - !ImportValue
-                    'Fn::Sub': '${ProjectName}-api-key-secret'
+                  - !ImportValue pdm-mongo-secret
+                  - !ImportValue pdm-api-key-secret
 
-  IngestionTaskRole:
+  # role for the containers themselves, shared by all three services
+  TaskRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -93,99 +50,36 @@ Resources:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: publish-features-only
+        - PolicyName: pdm-queues
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
                   - sqs:SendMessage
-                  - sqs:GetQueueAttributes
-                Resource: !ImportValue
-                  'Fn::Sub': '${ProjectName}-features-queue-arn'
-
-  InferenceTaskRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: consume-features-publish-high-risk
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
                   - sqs:ReceiveMessage
                   - sqs:DeleteMessage
                   - sqs:GetQueueAttributes
-                Resource: !ImportValue
-                  'Fn::Sub': '${ProjectName}-features-queue-arn'
-              - Effect: Allow
-                Action: sqs:SendMessage
-                Resource: !ImportValue
-                  'Fn::Sub': '${ProjectName}-high-risk-queue-arn'
-
-  AlertingTaskRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: consume-high-risk-only
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - sqs:ReceiveMessage
-                  - sqs:DeleteMessage
-                  - sqs:GetQueueAttributes
-                Resource: !ImportValue
-                  'Fn::Sub': '${ProjectName}-high-risk-queue-arn'
-
-  # --- Load balancer -------------------------------------------------------
+                Resource: !Sub 'arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:pdm-*'
 
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Name: !Sub '${ProjectName}-alb'
+      Name: pdm-alb
       Scheme: internet-facing
-      Type: application
       SecurityGroups:
-        - !ImportValue
-          'Fn::Sub': '${ProjectName}-alb-sg'
-      Subnets: !Split
-        - ','
-        - !ImportValue
-          'Fn::Sub': '${ProjectName}-public-subnets'
+        - !ImportValue pdm-alb-sg
+      Subnets: !Split [',', !ImportValue pdm-public-subnets]
 
   IngestionTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub '${ProjectName}-ingestion-tg'
+      Name: pdm-ingestion-tg
       Port: 3001
       Protocol: HTTP
       TargetType: ip
-      VpcId: !ImportValue
-        'Fn::Sub': '${ProjectName}-vpc-id'
+      VpcId: !ImportValue pdm-vpc-id
       HealthCheckPath: /health
-      HealthCheckIntervalSeconds: 15
-      HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
-      TargetGroupAttributes:
-        - Key: deregistration_delay.timeout_seconds
-          Value: '20'
 
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -193,72 +87,37 @@ Resources:
       LoadBalancerArn: !Ref LoadBalancer
       Port: 80
       Protocol: HTTP
-      DefaultActions: !If
-        - HasCertificate
-        # With a certificate present, plain HTTP is redirected rather than served.
-        - - Type: redirect
-            RedirectConfig:
-              Protocol: HTTPS
-              Port: '443'
-              StatusCode: HTTP_301
-        - - Type: forward
-            TargetGroupArn: !Ref IngestionTargetGroup
-
-  HttpsListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Condition: HasCertificate
-    Properties:
-      LoadBalancerArn: !Ref LoadBalancer
-      Port: 443
-      Protocol: HTTPS
-      Certificates:
-        - CertificateArn: !Ref CertificateArn
-      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref IngestionTargetGroup
 
-  # --- Task definitions ----------------------------------------------------
-
   IngestionTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub '${ProjectName}-ingestion'
+      Family: pdm-ingestion
       Cpu: '512'
       Memory: '1024'
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      TaskRoleArn: !GetAtt IngestionTaskRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
       ContainerDefinitions:
         - Name: ingestion
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}/ingestion:${ImageTag}'
-          Essential: true
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/pdm/ingestion:latest'
           PortMappings:
             - ContainerPort: 3001
           Environment:
-            - Name: NODE_ENV
-              Value: production
-            - Name: STORE_DRIVER
-              Value: mongo
-            - Name: EVENT_BUS_DRIVER
-              Value: sqs
+            - Name: USE_SQS
+              Value: 'true'
             - Name: AWS_REGION
               Value: !Ref AWS::Region
-            - Name: SQS_QUEUE_URLS
-              Value: !Sub
-                - '{"pdm/events/features":"${FeaturesUrl}","pdm/events/high-risk":"${HighRiskUrl}"}'
-                - FeaturesUrl: !ImportValue
-                    'Fn::Sub': '${ProjectName}-features-queue-url'
-                  HighRiskUrl: !ImportValue
-                    'Fn::Sub': '${ProjectName}-high-risk-queue-url'
+            - Name: FEATURES_QUEUE_URL
+              Value: !ImportValue pdm-features-queue-url
           Secrets:
             - Name: MONGO_URI
-              ValueFrom: !ImportValue
-                'Fn::Sub': '${ProjectName}-mongo-secret'
+              ValueFrom: !ImportValue pdm-mongo-secret
             - Name: API_KEY
-              ValueFrom: !ImportValue
-                'Fn::Sub': '${ProjectName}-api-key-secret'
+              ValueFrom: !ImportValue pdm-api-key-secret
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -269,41 +128,30 @@ Resources:
   InferenceTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub '${ProjectName}-inference'
+      Family: pdm-inference
       Cpu: '1024'
       Memory: '2048'
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      TaskRoleArn: !GetAtt InferenceTaskRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
       ContainerDefinitions:
         - Name: inference
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}/inference:${ImageTag}'
-          Essential: true
-          PortMappings:
-            - ContainerPort: 3002
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/pdm/inference:latest'
           Environment:
-            - Name: NODE_ENV
-              Value: production
-            - Name: STORE_DRIVER
-              Value: mongo
-            - Name: EVENT_BUS_DRIVER
-              Value: sqs
+            - Name: USE_SQS
+              Value: 'true'
             - Name: AWS_REGION
               Value: !Ref AWS::Region
-            - Name: RISK_THRESHOLD
-              Value: '0.7'
-            - Name: SQS_QUEUE_URLS
-              Value: !Sub
-                - '{"pdm/events/features":"${FeaturesUrl}","pdm/events/high-risk":"${HighRiskUrl}"}'
-                - FeaturesUrl: !ImportValue
-                    'Fn::Sub': '${ProjectName}-features-queue-url'
-                  HighRiskUrl: !ImportValue
-                    'Fn::Sub': '${ProjectName}-high-risk-queue-url'
+            - Name: FEATURES_QUEUE_URL
+              Value: !ImportValue pdm-features-queue-url
+            - Name: HIGH_RISK_QUEUE_URL
+              Value: !ImportValue pdm-high-risk-queue-url
+            - Name: CPU_BURN_MS
+              Value: '0'
           Secrets:
             - Name: MONGO_URI
-              ValueFrom: !ImportValue
-                'Fn::Sub': '${ProjectName}-mongo-secret'
+              ValueFrom: !ImportValue pdm-mongo-secret
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -314,37 +162,26 @@ Resources:
   AlertingTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub '${ProjectName}-alerting'
+      Family: pdm-alerting
       Cpu: '512'
       Memory: '1024'
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      TaskRoleArn: !GetAtt AlertingTaskRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
       ContainerDefinitions:
         - Name: alerting
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}/alerting:${ImageTag}'
-          Essential: true
-          PortMappings:
-            - ContainerPort: 3003
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/pdm/alerting:latest'
           Environment:
-            - Name: NODE_ENV
-              Value: production
-            - Name: STORE_DRIVER
-              Value: mongo
-            - Name: EVENT_BUS_DRIVER
-              Value: sqs
+            - Name: USE_SQS
+              Value: 'true'
             - Name: AWS_REGION
               Value: !Ref AWS::Region
-            - Name: SQS_QUEUE_URLS
-              Value: !Sub
-                - '{"pdm/events/high-risk":"${HighRiskUrl}"}'
-                - HighRiskUrl: !ImportValue
-                    'Fn::Sub': '${ProjectName}-high-risk-queue-url'
+            - Name: HIGH_RISK_QUEUE_URL
+              Value: !ImportValue pdm-high-risk-queue-url
           Secrets:
             - Name: MONGO_URI
-              ValueFrom: !ImportValue
-                'Fn::Sub': '${ProjectName}-mongo-secret'
+              ValueFrom: !ImportValue pdm-mongo-secret
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -352,28 +189,21 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: alerting
 
-  # --- Services ------------------------------------------------------------
-
   IngestionService:
     Type: AWS::ECS::Service
     DependsOn: HttpListener
     Properties:
-      ServiceName: !Sub '${ProjectName}-ingestion'
+      ServiceName: pdm-ingestion
       Cluster: !Ref Cluster
       TaskDefinition: !Ref IngestionTaskDefinition
-      DesiredCount: 2
+      DesiredCount: 1
       LaunchType: FARGATE
-      HealthCheckGracePeriodSeconds: 30
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
           SecurityGroups:
-            - !ImportValue
-              'Fn::Sub': '${ProjectName}-service-sg'
-          Subnets: !Split
-            - ','
-            - !ImportValue
-              'Fn::Sub': '${ProjectName}-public-subnets'
+            - !ImportValue pdm-service-sg
+          Subnets: !Split [',', !ImportValue pdm-public-subnets]
       LoadBalancers:
         - ContainerName: ingestion
           ContainerPort: 3001
@@ -382,28 +212,22 @@ Resources:
   InferenceService:
     Type: AWS::ECS::Service
     Properties:
-      ServiceName: !Sub '${ProjectName}-inference'
+      ServiceName: pdm-inference
       Cluster: !Ref Cluster
       TaskDefinition: !Ref InferenceTaskDefinition
-      DesiredCount: !Ref InferenceMinTasks
+      DesiredCount: 1
       LaunchType: FARGATE
-      # No load balancer: this service is driven entirely by the queue, which
-      # is what lets it scale on backlog rather than on request rate.
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
           SecurityGroups:
-            - !ImportValue
-              'Fn::Sub': '${ProjectName}-service-sg'
-          Subnets: !Split
-            - ','
-            - !ImportValue
-              'Fn::Sub': '${ProjectName}-public-subnets'
+            - !ImportValue pdm-service-sg
+          Subnets: !Split [',', !ImportValue pdm-public-subnets]
 
   AlertingService:
     Type: AWS::ECS::Service
     Properties:
-      ServiceName: !Sub '${ProjectName}-alerting'
+      ServiceName: pdm-alerting
       Cluster: !Ref Cluster
       TaskDefinition: !Ref AlertingTaskDefinition
       DesiredCount: 1
@@ -412,60 +236,28 @@ Resources:
         AwsvpcConfiguration:
           AssignPublicIp: ENABLED
           SecurityGroups:
-            - !ImportValue
-              'Fn::Sub': '${ProjectName}-service-sg'
-          Subnets: !Split
-            - ','
-            - !ImportValue
-              'Fn::Sub': '${ProjectName}-public-subnets'
+            - !ImportValue pdm-service-sg
+          Subnets: !Split [',', !ImportValue pdm-public-subnets]
 
-  # --- Auto scaling --------------------------------------------------------
-  # CPU alone is a poor signal here: a task blocked on SQS long-polling looks
-  # idle even when the backlog is growing. Backlog-per-task is the metric that
-  # actually reflects whether the fleet is keeping up, so it drives scale-out
-  # and CPU is kept only as a secondary safety net.
-
+  # Auto scaling for inference (1-10 tasks) based on how many messages are
+  # waiting in the features queue
   InferenceScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Properties:
       ServiceNamespace: ecs
       ScalableDimension: ecs:service:DesiredCount
-      ResourceId: !Sub
-        - 'service/${ClusterName}/${ServiceName}'
-        - ClusterName: !Ref Cluster
-          ServiceName: !GetAtt InferenceService.Name
-      MinCapacity: !Ref InferenceMinTasks
-      MaxCapacity: !Ref InferenceMaxTasks
-      RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
-
-  BacklogPerTaskMetric:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub '${ProjectName}-inference-backlog-high'
-      AlarmDescription: Features queue backlog is growing faster than the fleet can drain it
-      Namespace: AWS/SQS
-      MetricName: ApproximateNumberOfMessagesVisible
-      Dimensions:
-        - Name: QueueName
-          Value: !ImportValue
-            'Fn::Sub': '${ProjectName}-features-queue-name'
-      Statistic: Average
-      Period: 60
-      EvaluationPeriods: 1
-      Threshold: 100
-      ComparisonOperator: GreaterThanThreshold
-      TreatMissingData: notBreaching
+      ResourceId: !Sub 'service/${Cluster}/${InferenceService.Name}'
+      MinCapacity: 1
+      MaxCapacity: 10
 
   InferenceScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Properties:
-      PolicyName: !Sub '${ProjectName}-inference-backlog-target'
+      PolicyName: pdm-inference-queue-depth
       PolicyType: TargetTrackingScaling
       ScalingTargetId: !Ref InferenceScalableTarget
       TargetTrackingScalingPolicyConfiguration:
-        TargetValue: !Ref BacklogPerTaskTarget
-        # Scale out quickly when the backlog spikes, but drain slowly, so a
-        # brief lull does not remove capacity that is about to be needed again.
+        TargetValue: 30
         ScaleOutCooldown: 60
         ScaleInCooldown: 300
         CustomizedMetricSpecification:
@@ -474,30 +266,8 @@ Resources:
           Statistic: Average
           Dimensions:
             - Name: QueueName
-              Value: !ImportValue
-                'Fn::Sub': '${ProjectName}-features-queue-name'
-
-  InferenceCpuPolicy:
-    Type: AWS::ApplicationAutoScaling::ScalingPolicy
-    Properties:
-      PolicyName: !Sub '${ProjectName}-inference-cpu-target'
-      PolicyType: TargetTrackingScaling
-      ScalingTargetId: !Ref InferenceScalableTarget
-      TargetTrackingScalingPolicyConfiguration:
-        TargetValue: 65
-        ScaleOutCooldown: 60
-        ScaleInCooldown: 300
-        PredefinedMetricSpecification:
-          PredefinedMetricType: ECSServiceAverageCPUUtilization
+              Value: pdm-features
 
 Outputs:
-  ClusterName:
-    Value: !Ref Cluster
   IngestionEndpoint:
-    Description: Base URL the Node-RED edge gateway posts to
-    Value: !Sub
-      - '${Scheme}://${Dns}'
-      - Scheme: !If [HasCertificate, https, http]
-        Dns: !GetAtt LoadBalancer.DNSName
-  InferenceServiceName:
-    Value: !GetAtt InferenceService.Name
+    Value: !Sub 'http://${LoadBalancer.DNSName}'

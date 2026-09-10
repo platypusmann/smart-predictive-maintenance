@@ -1,17 +1,11 @@
 """
-Generate a synthetic run-to-failure dataset for the predictive maintenance model.
+Generate a fake run-to-failure dataset.
 
-Each simulated machine runs from healthy until failure. A fault is seeded at a
-random point in its life and then grows, pushing vibration, temperature and
-current draw away from their healthy baselines while RPM sags under load.
+Each machine runs until it fails. At a random point a fault starts and
+vibration, temperature and current go up while RPM drops. A window is labelled
+1 if the machine fails within 10 minutes of the end of that window.
 
-Windows are labelled positive when the machine fails within FAILURE_HORIZON_S
-seconds of the end of the window, which is exactly the question the deployed
-model is asked at inference time: "is this machine about to fail?".
-
-The same degradation physics are implemented in services/simulator so the live
-simulated fleet produces data drawn from the same distribution the model was
-trained on.
+services/simulator/src/machine.js uses the same numbers for the live demo.
 
 Usage:
     python generate_dataset.py --machines 400 --out artifacts/dataset.csv
@@ -47,7 +41,7 @@ def simulate_machine(rng, machine_type):
 
     life_s = rng.randint(3 * 3600, 10 * 3600)          # 3 to 10 hours of life
     fault_onset_s = rng.randint(int(life_s * 0.35), int(life_s * 0.8))
-    # Exponent < 1 degrades early and gently, > 1 stays flat then collapses.
+    # bigger shape = stays ok for longer then gets bad quickly
     shape = rng.uniform(1.4, 3.2)
 
     readings = []

@@ -1,15 +1,10 @@
 // Node-RED function node: rolling window + feature extraction
 //
-// This is the edge processing step described in the project plan. It keeps a
-// 30-sample window per machine in node context, and every 10 samples emits an
-// ordered feature vector for the ingestion service.
+// Keeps the last 30 readings for each machine and every 10 readings sends on a
+// feature vector. Same maths as packages/shared/src/features.js (copied in
+// because function nodes can't require our own modules).
 //
-// The logic is a literal port of packages/shared/src/features.js. It has to be
-// inlined because Node-RED function nodes cannot require project modules
-// without editing settings.js, and tests/nodered.test.js checks that this file
-// still produces identical vectors to the shared module.
-//
-// Build into flows.json with: npm run flows:build
+// After editing run: npm run flows:build
 
 const WINDOW_SIZE = 30;
 const STRIDE = 10;

@@ -3,9 +3,8 @@
 module.exports = {
   ...require('./features'),
   ...require('./forest'),
-  ...require('./eventBus'),
+  ...require('./policy'),
   ...require('./config'),
   ...require('./logger'),
-  ...require('./store'),
-  ...require('./policy'),
+  messaging: require('./messaging'),
 };

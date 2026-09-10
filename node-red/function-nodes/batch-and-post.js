@@ -1,11 +1,7 @@
-// Node-RED function node: batch feature vectors before posting to ingestion
+// Node-RED function node: batch up feature vectors (25 at a time or every 2s)
+// so we're not doing one HTTP request per vector.
 //
-// One HTTP request per feature vector would create a request per machine every
-// 10 seconds, which becomes the dominant cost long before the microservices are
-// under any real pressure. Batching amortises the request overhead and matches
-// the batch API the ingestion service exposes.
-//
-// Build into flows.json with: npm run flows:build
+// After editing run: npm run flows:build
 
 const BATCH_SIZE = 25;
 const MAX_AGE_MS = 2000;

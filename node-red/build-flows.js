@@ -1,14 +1,8 @@
 'use strict';
 
-/**
- * Build node-red/flows.json from the readable sources in function-nodes/.
- *
- * Keeping the function bodies in real .js files means they can be linted and
- * unit tested like any other module, instead of living as escaped strings
- * inside a JSON blob that is only editable through the Node-RED UI.
- *
- * Usage: node node-red/build-flows.js
- */
+// Builds node-red/flows.json using the function node code in function-nodes/
+// (much easier to edit them as normal .js files than inside the JSON).
+// Usage: npm run flows:build
 
 const fs = require('fs');
 const path = require('path');

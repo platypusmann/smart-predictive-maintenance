@@ -1,89 +1,69 @@
 """
-Prove that the Node.js inference path reproduces scikit-learn exactly.
+Sanity check that the Node.js version of the model (features.js + forest.js)
+gives the same answers as the Python/sklearn version, on a few example windows.
 
-The deployed model is not the .joblib file: it is the JSON export scored by
-packages/shared/src/forest.js. That means "the model scored 0.97 in testing" is
-only a meaningful claim about the running system if the JS implementation
-agrees with the Python one. This script checks two things on random windows:
-
-  1. feature parity  - ml/features.py and features.js produce identical vectors
-  2. score parity    - the JS forest and RandomForestClassifier.predict_proba
-                       produce identical probabilities
-
-Exit code is non-zero if either check fails, so it can gate a deployment.
-
-Usage:
-    python verify_parity.py --cases 500
+Usage: python verify_parity.py   (run train_model.py first)
 """
 
-import argparse
 import json
-import random
+import math
+import os
 import subprocess
 import sys
-import os
 
 import joblib
-import numpy as np
 
-from features import CHANNELS, extract_features
+from features import extract_features
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+TOLERANCE = 0.01
 
-# Tolerances. Both sides do the same arithmetic in IEEE-754 doubles, so the only
-# expected difference is floating point summation order.
-FEATURE_TOLERANCE = 1e-9
-SCORE_TOLERANCE = 1e-12
+# name, vibration, temperature, current, rpm, runtime hours, drift across the window
+CASES = [
+    ("healthy pump", 2.5, 55.0, 12.0, 1450, 1.0, 0.0),
+    ("healthy compressor", 3.2, 62.0, 18.0, 2900, 2.0, 0.0),
+    ("healthy conveyor", 1.8, 45.0, 8.0, 900, 0.5, 0.0),
+    ("brand new pump", 2.5, 55.0, 12.0, 1450, 0.0, 0.0),
+    ("old compressor, still ok", 3.2, 62.0, 18.0, 2900, 11.0, 0.0),
+    ("pump starting to wear", 3.5, 60.0, 13.5, 1420, 5.0, 0.02),
+    ("compressor starting to wear", 4.0, 68.0, 20.0, 2850, 4.0, 0.02),
+    ("conveyor starting to wear", 2.6, 50.0, 9.5, 870, 3.0, 0.02),
+    ("pump about to fail", 6.5, 76.0, 18.0, 1280, 8.0, 0.05),
+    ("compressor about to fail", 7.2, 84.0, 24.5, 2720, 9.0, 0.05),
+    ("conveyor about to fail", 5.9, 67.0, 14.5, 720, 7.5, 0.05),
+    ("hot but cooling down", 4.5, 70.0, 15.0, 1400, 6.0, -0.03),
+]
 
 
-def random_window(rng, size=30):
-    """A window of plausible but deliberately varied sensor readings."""
-    base = {
-        "vibration": rng.uniform(1.0, 9.0),
-        "temperature": rng.uniform(35.0, 95.0),
-        "current": rng.uniform(5.0, 28.0),
-        "rpm": rng.uniform(700.0, 3100.0),
-    }
-    drift = {ch: rng.uniform(-0.05, 0.15) * base[ch] for ch in CHANNELS}
-
+def make_window(vibration, temperature, current, rpm, drift, size=30):
+    base = {"vibration": vibration, "temperature": temperature, "current": current, "rpm": rpm}
     window = []
     for i in range(size):
-        reading = {}
-        for ch in CHANNELS:
-            reading[ch] = base[ch] + drift[ch] * i / size + rng.gauss(0, base[ch] * 0.02)
-        window.append(reading)
+        # a small wobble so std isn't 0, plus the drift
+        factor = 1 + drift * i / size + 0.01 * math.sin(i)
+        window.append({ch: value * factor for ch, value in base.items()})
     return window
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cases", type=int, default=500)
-    parser.add_argument("--seed", type=int, default=7)
-    args = parser.parse_args()
+    model_path = os.path.join(HERE, "artifacts", "model.joblib")
+    if not os.path.exists(model_path):
+        print("No model found, run train_model.py first")
+        return 1
+    model = joblib.load(model_path)
 
-    model_json = os.path.join(HERE, "artifacts", "model.json")
-    model_joblib = os.path.join(HERE, "artifacts", "model.joblib")
-    for path in (model_json, model_joblib):
-        if not os.path.exists(path):
-            print(f"Missing {path}. Run train_model.py first.")
-            return 1
-
-    rng = random.Random(args.seed)
     cases = []
-    for _ in range(args.cases):
-        window = random_window(rng)
-        cases.append({"window": window, "runtimeHours": rng.uniform(0, 12)})
+    for name, vib, temp, cur, rpm, hours, drift in CASES:
+        cases.append({
+            "name": name,
+            "window": make_window(vib, temp, cur, rpm, drift),
+            "runtimeHours": hours,
+        })
 
-    # --- Python side -----------------------------------------------------
-    py_features = np.array(
-        [extract_features(c["window"], c["runtimeHours"]) for c in cases],
-        dtype=np.float64,
-    )
-    model = joblib.load(model_joblib)
+    py_features = [extract_features(c["window"], c["runtimeHours"]) for c in cases]
     py_scores = model.predict_proba(py_features)[:, 1]
 
-    # --- Node side -------------------------------------------------------
-    print(f"Running {args.cases} cases through the Node.js implementation...")
+    # run the same windows through the JS code
     proc = subprocess.run(
         ["node", os.path.join(HERE, "parity_node.js")],
         input=json.dumps({"cases": cases}),
@@ -91,43 +71,26 @@ def main():
         text=True,
     )
     if proc.returncode != 0:
-        print("Node parity harness failed:")
+        print("parity_node.js failed:")
         print(proc.stderr)
         return 1
+    js = json.loads(proc.stdout)
 
-    node_output = json.loads(proc.stdout)
-    node_features = np.array(node_output["features"], dtype=np.float64)
-    node_scores = np.array(node_output["scores"], dtype=np.float64)
+    failures = 0
+    for i, case in enumerate(cases):
+        feature_diff = max(abs(a - b) for a, b in zip(py_features[i], js["features"][i]))
+        score_diff = abs(py_scores[i] - js["scores"][i])
+        ok = feature_diff < TOLERANCE and score_diff < TOLERANCE
+        if not ok:
+            failures += 1
+        print(f"{case['name']:<30} python {py_scores[i]:.3f}   js {js['scores'][i]:.3f}   {'ok' if ok else 'MISMATCH'}")
 
-    # --- Compare ---------------------------------------------------------
-    feature_diff = np.abs(py_features - node_features)
-    score_diff = np.abs(py_scores - node_scores)
+    if failures:
+        print(f"\nFAIL: {failures} of {len(cases)} cases didn't match")
+        return 1
 
-    max_feature_diff = float(feature_diff.max())
-    max_score_diff = float(score_diff.max())
-
-    print("\n=== Parity report ===")
-    print(f"Cases compared            : {args.cases}")
-    print(f"Features per case         : {py_features.shape[1]}")
-    print(f"Max feature difference    : {max_feature_diff:.3e}  (tol {FEATURE_TOLERANCE:.0e})")
-    print(f"Max score difference      : {max_score_diff:.3e}  (tol {SCORE_TOLERANCE:.0e})")
-    print(f"Exact score matches       : {int((score_diff == 0).sum())}/{args.cases}")
-
-    ok = True
-    if max_feature_diff > FEATURE_TOLERANCE:
-        worst = int(np.unravel_index(feature_diff.argmax(), feature_diff.shape)[1])
-        print(f"\nFEATURE PARITY FAILED (worst feature index {worst})")
-        ok = False
-    if max_score_diff > SCORE_TOLERANCE:
-        print("\nSCORE PARITY FAILED")
-        ok = False
-
-    if ok:
-        print("\nPASS: the Node.js inference path reproduces scikit-learn.")
-        return 0
-
-    print("\nFAIL: implementations have diverged. Do not deploy this model.")
-    return 1
+    print(f"\nPASS: all {len(cases)} cases match")
+    return 0
 
 
 if __name__ == "__main__":

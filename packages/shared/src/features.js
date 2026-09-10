@@ -1,22 +1,12 @@
 'use strict';
 
-/**
- * Canonical feature definition for the predictive maintenance model.
- *
- * IMPORTANT: this file and ml/features.py MUST stay in sync. The parity test
- * (`npm run verify:parity`) proves both produce identical vectors for the same
- * window; if you change a statistic here, change it there too.
- */
+// Feature extraction. This has to give the same numbers as ml/features.py,
+// otherwise the model gets different inputs to what it was trained on.
 
-// Raw sensor channels captured from each machine, in a fixed order.
 const CHANNELS = ['vibration', 'temperature', 'current', 'rpm'];
-
-// Statistics computed per channel over a rolling window.
 const STATS = ['mean', 'std', 'min', 'max', 'slope'];
+const WINDOW_SIZE = 30; // 30 readings = 30 seconds at 1Hz
 
-const WINDOW_SIZE = 30; // readings per window (30 s at 1 Hz)
-
-/** Canonical, ordered list of feature names. */
 function featureNames() {
   const names = [];
   for (const channel of CHANNELS) {
@@ -28,10 +18,7 @@ function featureNames() {
   return names;
 }
 
-/**
- * Least-squares slope of `values` against the index 0..n-1.
- * Closed form so it matches numpy exactly without a linear algebra library.
- */
+// least squares slope against x = 0..n-1
 function slope(values) {
   const n = values.length;
   if (n < 2) return 0;
@@ -56,7 +43,7 @@ function slope(values) {
   return numerator / denominator;
 }
 
-/** Population standard deviation (ddof = 0), matching numpy's default. */
+// population std (same as numpy's default)
 function populationStd(values, mean) {
   const n = values.length;
   if (n === 0) return 0;
@@ -68,13 +55,7 @@ function populationStd(values, mean) {
   return Math.sqrt(sum / n);
 }
 
-/**
- * Turn a window of raw readings into an ordered feature vector.
- *
- * @param {Array<Object>} window   readings, each containing every CHANNELS key
- * @param {number} runtimeHours    machine runtime at the end of the window
- * @returns {number[]}             ordered exactly as featureNames()
- */
+// mean, std, min, max, slope for each channel, then runtime hours on the end
 function extractFeatures(window, runtimeHours) {
   if (!Array.isArray(window) || window.length === 0) {
     throw new Error('extractFeatures requires a non-empty window');
@@ -82,40 +63,32 @@ function extractFeatures(window, runtimeHours) {
 
   const vector = [];
   for (const channel of CHANNELS) {
-    const series = new Array(window.length);
-    for (let i = 0; i < window.length; i += 1) {
-      const value = Number(window[i][channel]);
+    const series = window.map((reading, i) => {
+      const value = Number(reading[channel]);
       if (!Number.isFinite(value)) {
         throw new Error(`window[${i}].${channel} is not a finite number`);
       }
-      series[i] = value;
-    }
+      return value;
+    });
 
     let sum = 0;
     let min = Infinity;
     let max = -Infinity;
-    for (let i = 0; i < series.length; i += 1) {
-      sum += series[i];
-      if (series[i] < min) min = series[i];
-      if (series[i] > max) max = series[i];
+    for (const value of series) {
+      sum += value;
+      if (value < min) min = value;
+      if (value > max) max = value;
     }
     const mean = sum / series.length;
 
-    vector.push(mean);
-    vector.push(populationStd(series, mean));
-    vector.push(min);
-    vector.push(max);
-    vector.push(slope(series));
+    vector.push(mean, populationStd(series, mean), min, max, slope(series));
   }
 
   vector.push(Number(runtimeHours) || 0);
   return vector;
 }
 
-/**
- * Fixed-size rolling buffer of raw readings, one per machine.
- * Emits a feature vector once it is full and the stride has elapsed.
- */
+// Keeps the last `size` readings for a machine and returns features every `stride` readings
 class RollingWindow {
   constructor({ size = WINDOW_SIZE, stride = 10 } = {}) {
     this.size = size;
@@ -124,10 +97,6 @@ class RollingWindow {
     this.sinceEmit = 0;
   }
 
-  /**
-   * Push a raw reading. Returns a feature vector when one is due, else null.
-   * @param {Object} reading must contain every CHANNELS key plus runtimeHours
-   */
   push(reading) {
     this.buffer.push(reading);
     if (this.buffer.length > this.size) {
