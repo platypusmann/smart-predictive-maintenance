@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-REGION="${AWS_REGION:-ap-southeast-2}"
+REGION="${AWS_REGION:-us-east-1}"
 
 read -rp "Delete the pdm stacks in ${REGION}? [y/N] " CONFIRM
 [[ "$CONFIRM" == "y" || "$CONFIRM" == "Y" ]] || { echo "Cancelled."; exit 0; }

@@ -14,54 +14,6 @@ Resources:
       LogGroupName: /ecs/pdm
       RetentionInDays: 7
 
-  # used by ECS to pull images and read the secrets
-  ExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-      Policies:
-        - PolicyName: read-secrets
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: secretsmanager:GetSecretValue
-                Resource:
-                  - !ImportValue pdm-mongo-secret
-                  - !ImportValue pdm-api-key-secret
-
-  # role for the containers themselves, shared by all three services
-  TaskRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: pdm-queues
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - sqs:SendMessage
-                  - sqs:ReceiveMessage
-                  - sqs:DeleteMessage
-                  - sqs:GetQueueAttributes
-                Resource: !Sub 'arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:pdm-*'
-
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -99,8 +51,8 @@ Resources:
       Memory: '1024'
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      TaskRoleArn: !GetAtt TaskRole.Arn
+      ExecutionRoleArn: arn:aws:iam::604535544616:role/LabRole
+      TaskRoleArn: arn:aws:iam::604535544616:role/LabRole
       ContainerDefinitions:
         - Name: ingestion
           Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/pdm/ingestion:latest'
@@ -133,8 +85,8 @@ Resources:
       Memory: '2048'
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      TaskRoleArn: !GetAtt TaskRole.Arn
+      ExecutionRoleArn: arn:aws:iam::604535544616:role/LabRole
+      TaskRoleArn: arn:aws:iam::604535544616:role/LabRole
       ContainerDefinitions:
         - Name: inference
           Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/pdm/inference:latest'
@@ -167,8 +119,8 @@ Resources:
       Memory: '1024'
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
-      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
-      TaskRoleArn: !GetAtt TaskRole.Arn
+      ExecutionRoleArn: arn:aws:iam::604535544616:role/LabRole
+      TaskRoleArn: arn:aws:iam::604535544616:role/LabRole
       ContainerDefinitions:
         - Name: alerting
           Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/pdm/alerting:latest'

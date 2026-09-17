@@ -7,7 +7,7 @@ set -euo pipefail
 
 DURATION="${1:-600}"
 INTERVAL="${2:-10}"
-REGION="${AWS_REGION:-ap-southeast-2}"
+REGION="${AWS_REGION:-us-east-1}"
 
 QUEUE_URL="$(aws sqs get-queue-url --region "$REGION" --queue-name pdm-features --query QueueUrl --output text)"
 

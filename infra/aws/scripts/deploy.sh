@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-REGION="${AWS_REGION:-ap-southeast-2}"
+REGION="${AWS_REGION:-us-east-1}"
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
