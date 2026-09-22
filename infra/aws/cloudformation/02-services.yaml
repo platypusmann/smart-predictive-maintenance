@@ -1,6 +1,19 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: PdM services - ECS cluster, the three services, load balancer and auto scaling
 
+Parameters:
+  InferenceMaxTasks:
+    Type: Number
+    Default: 10
+    Description: >
+      Ceiling for the inference service's auto scaling target (max ECS tasks).
+      Originally fixed at 10; the HD capacity planning experiment (see
+      docs/CAPACITY-PLANNING.md) measures a single task's maximum sustainable
+      throughput (MST) and calculates this value from a target fleet size
+      instead of leaving it as an arbitrary constant. Pin it to 1 when running
+      the MST probe itself, so no autoscaling can mask the single-task
+      ceiling.
+
 Resources:
 
   Cluster:
@@ -200,7 +213,7 @@ Resources:
       ScalableDimension: ecs:service:DesiredCount
       ResourceId: !Sub 'service/${Cluster}/${InferenceService.Name}'
       MinCapacity: 1
-      MaxCapacity: 10
+      MaxCapacity: !Ref InferenceMaxTasks
 
   InferenceScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy

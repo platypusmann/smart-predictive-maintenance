@@ -44,10 +44,11 @@ build_images() {
 }
 
 deploy_services() {
-  echo "==> services stack"
+  echo "==> services stack (InferenceMaxTasks=${INFERENCE_MAX_TASKS:-10})"
   aws cloudformation deploy --region "$REGION" --stack-name pdm-services \
     --template-file "$ROOT/infra/aws/cloudformation/02-services.yaml" \
     --capabilities CAPABILITY_IAM \
+    --parameter-overrides "InferenceMaxTasks=${INFERENCE_MAX_TASKS:-10}" \
     --no-fail-on-empty-changeset
 
   aws cloudformation describe-stacks --region "$REGION" --stack-name pdm-services \

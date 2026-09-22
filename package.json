@@ -28,6 +28,7 @@
     "start:edge": "node services/edge-bridge/src/index.js",
     "start:stack": "node scripts/run-stack.js",
     "loadtest": "node loadtest/src/ramp.js",
+    "mst-probe": "node loadtest/src/mst-probe.js",
     "smoke": "node scripts/smoke-test.js"
   },
   "devDependencies": {
