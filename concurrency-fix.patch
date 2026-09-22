@@ -1,0 +1,151 @@
+diff --git a/infra/aws/cloudformation/02-services.yaml b/infra/aws/cloudformation/02-services.yaml
+index 7f79b08..118783c 100644
+--- a/infra/aws/cloudformation/02-services.yaml
++++ b/infra/aws/cloudformation/02-services.yaml
+@@ -14,6 +14,17 @@ Parameters:
+       the MST probe itself, so no autoscaling can mask the single-task
+       ceiling.
+ 
++  InferenceConcurrency:
++    Type: Number
++    Default: 1
++    Description: >
++      How many feature events a single inference task handles concurrently
++      per received SQS batch, instead of strictly one at a time. Default 1
++      reproduces the original serial behaviour. Raising this lets several
++      in-flight MongoDB writes overlap instead of paying each one's round
++      trip serially, which the MST probe showed was the actual bottleneck,
++      not model scoring time. See docs/CAPACITY-PLANNING.md.
++
+ Resources:
+ 
+   Cluster:
+@@ -114,6 +125,8 @@ Resources:
+               Value: !ImportValue pdm-high-risk-queue-url
+             - Name: CPU_BURN_MS
+               Value: '0'
++            - Name: INFERENCE_CONCURRENCY
++              Value: !Ref InferenceConcurrency
+           Secrets:
+             - Name: MONGO_URI
+               ValueFrom: !ImportValue pdm-mongo-secret
+diff --git a/infra/aws/scripts/deploy.sh b/infra/aws/scripts/deploy.sh
+index d7c6d15..2fa9d52 100644
+--- a/infra/aws/scripts/deploy.sh
++++ b/infra/aws/scripts/deploy.sh
+@@ -44,11 +44,13 @@ build_images() {
+ }
+ 
+ deploy_services() {
+-  echo "==> services stack (InferenceMaxTasks=${INFERENCE_MAX_TASKS:-10})"
++  echo "==> services stack (InferenceMaxTasks=${INFERENCE_MAX_TASKS:-10}, InferenceConcurrency=${INFERENCE_CONCURRENCY:-1})"
+   aws cloudformation deploy --region "$REGION" --stack-name pdm-services \
+     --template-file "$ROOT/infra/aws/cloudformation/02-services.yaml" \
+     --capabilities CAPABILITY_IAM \
+-    --parameter-overrides "InferenceMaxTasks=${INFERENCE_MAX_TASKS:-10}" \
++    --parameter-overrides \
++      "InferenceMaxTasks=${INFERENCE_MAX_TASKS:-10}" \
++      "InferenceConcurrency=${INFERENCE_CONCURRENCY:-1}" \
+     --no-fail-on-empty-changeset
+ 
+   aws cloudformation describe-stacks --region "$REGION" --stack-name pdm-services \
+diff --git a/packages/shared/src/config.js b/packages/shared/src/config.js
+index d090de5..975e25e 100644
+--- a/packages/shared/src/config.js
++++ b/packages/shared/src/config.js
+@@ -25,6 +25,9 @@ function loadConfig() {
+ 
+     modelPath: process.env.MODEL_PATH || '',
+     riskThreshold: Number(process.env.RISK_THRESHOLD || 0.7),
++    // how many feature events inference handles concurrently per received
++    // SQS batch, instead of one at a time (see docs/CAPACITY-PLANNING.md)
++    inferenceConcurrency: Number(process.env.INFERENCE_CONCURRENCY || 1),
+     // need this many high risk windows in a row before raising a work order
+     consecutiveBreaches: Number(process.env.CONSECUTIVE_BREACHES || 3),
+     alertCooldownMs: Number(process.env.ALERT_COOLDOWN_MS || 15 * 60 * 1000),
+diff --git a/packages/shared/src/messaging.js b/packages/shared/src/messaging.js
+index bafc4b2..408ea61 100644
+--- a/packages/shared/src/messaging.js
++++ b/packages/shared/src/messaging.js
+@@ -45,16 +45,24 @@ async function publish(topic, message) {
+   }
+ }
+ 
+-async function subscribe(topic, handler) {
++// `concurrency` controls how many messages from a single received batch are
++// handled at once. Default is 1, which reproduces the original strictly
++// one-at-a-time behaviour - important for a consumer like alerting, which
++// keeps per-machine streak state in memory and depends on that machine's
++// windows being handled in the order they arrive. A stateless consumer like
++// inference has no such ordering requirement, so it can opt into a higher
++// concurrency to overlap several in-flight Mongo writes instead of paying
++// each one's round trip serially. See docs/CAPACITY-PLANNING.md.
++async function subscribe(topic, handler, { concurrency = 1 } = {}) {
+   if (config.useSqs) {
+-    pollQueue(queueUrls[topic], handler); // not awaited, runs forever
++    pollQueue(queueUrls[topic], handler, concurrency); // not awaited, runs forever
+   } else {
+     handlers[topic] = handler;
+     await mqttClient.subscribeAsync(topic, { qos: 1 });
+   }
+ }
+ 
+-async function pollQueue(queueUrl, handler) {
++async function pollQueue(queueUrl, handler, concurrency) {
+   while (true) {
+     let messages = [];
+     try {
+@@ -67,16 +75,23 @@ async function pollQueue(queueUrl, handler) {
+     } catch (err) {
+       console.error(`SQS receive failed: ${err.message}`);
+       await new Promise((resolve) => setTimeout(resolve, 2000));
++      continue;
+     }
+ 
+-    for (const msg of messages) {
+-      try {
+-        await handler(JSON.parse(msg.Body));
+-        // only delete after it's handled, otherwise SQS gives it to someone else later
+-        await sqs.send(new aws.DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: msg.ReceiptHandle }));
+-      } catch (err) {
+-        console.error(`error handling message: ${err.message}`);
+-      }
++    // Process the batch in chunks of `concurrency` messages at a time.
++    // Each message is handled and deleted independently, so one failure
++    // doesn't hold up the rest of its chunk or get retried twice.
++    for (let i = 0; i < messages.length; i += concurrency) {
++      const chunk = messages.slice(i, i + concurrency);
++      await Promise.all(chunk.map(async (msg) => {
++        try {
++          await handler(JSON.parse(msg.Body));
++          // only delete after it's handled, otherwise SQS gives it to someone else later
++          await sqs.send(new aws.DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: msg.ReceiptHandle }));
++        } catch (err) {
++          console.error(`error handling message: ${err.message}`);
++        }
++      }));
+     }
+   }
+ }
+diff --git a/services/inference/src/server.js b/services/inference/src/server.js
+index 0d5511c..f7ea087 100644
+--- a/services/inference/src/server.js
++++ b/services/inference/src/server.js
+@@ -54,6 +54,8 @@ async function main() {
+   await messaging.connect(`inference-${process.pid}`);
+ 
+   await messaging.subscribe(TOPICS.FEATURES, async (event) => {
++    // this handler is stateless and safe to run concurrently; see
++    // config.inferenceConcurrency and docs/CAPACITY-PLANNING.md
+     const start = process.hrtime.bigint();
+     const result = forest.score(event.features, config.riskThreshold);
+     if (CPU_BURN_MS > 0) burnCpu(CPU_BURN_MS);
+@@ -81,7 +83,7 @@ async function main() {
+ 
+     metrics.increment('predictions_scored');
+     metrics.observeLatency(latencyMs);
+-  });
++  }, { concurrency: config.inferenceConcurrency });
+ 
+   const app = express();
+ 
